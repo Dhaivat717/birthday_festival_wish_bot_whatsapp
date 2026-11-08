@@ -14,22 +14,25 @@ const WISH_PATTERNS = [
   /\bwishing\s+you\s+a\s+very\s+happy\b/i,
   /\bhave\s+a\s+(?:great|wonderful|blessed)\s+(?:birthday|year\s+ahead|day)\b/i,
   // Anniversary / Milestones
-  /\bhappy\s+(?:wedding\s+)?anniversary\b/i,
+  /\bhappy\s+(?:wedding\s+|marriage\s+)?anniversary\b/i,
+  /\bsalgirah\s+mubarak\b/i,
+  /\bwishing\s+you\s+both\s+a\s+(?:very\s+)?happy\b/i,
   // Festival & Holiday patterns
-  /\bhappy\s+(?:diwali|deepavali|holi|navratri|dussehra|ganesh\s+chaturthi|makar\s+sankranti|pongal|onam|ugadi|gudi\s+padwa|baisakhi|lohri|raksha\s+bandhan|rakhi|janmashtami|ram\s+navami|maha\s+shivratri)\b/i,
+  /\bhappy\s+(?:diwali|deepavali|holi|dhuleti|navratri|dussehra|ganesh\s+chaturthi|makar\s+sankranti|uttarayan|pongal|onam|ugadi|gudi\s+padwa|baisakhi|lohri|raksha\s+bandhan|rakhi|janmashtami|ram\s+navami|maha\s+shivratri|dhanteras|guru\s+purnima|hanuman\s+jayanti)\b/i,
   /\bhappy\s+(?:new\s+year|easter|thanksgiving|hanukkah|passover|halloween|independence\s+day|republic\s+day)\b/i,
   /\bmerry\s+christmas\b/i,
   /\bxmas\b/i,
   /\beid\s+mubarak\b/i,
   /\bramadan\s+(?:mubarak|kareem)\b/i,
-  /\bshubh\s+(?:diwali|deepavali|navratri|holi|dhanteras|dussehra|ganesh\s+chaturthi)\b/i,
+  /\bshubh\s+(?:diwali|deepavali|navratri|holi|dhanteras|dussehra|ganesh\s+chaturthi|uttarayan)\b/i,
   /\bsaal\s+mubarak\b/i,
   /\bnutan\s+varshabhinandan\b/i,
+  /\bganpati\s+bappa\s+morya\b/i,
   /\bchag\s+sameach\b/i,
   /\b(?:heartiest|warmest)\s+(?:greetings|wishes)\b/i,
 ];
 
-const BIRTHDAY_EMOJIS = ['🎂', '🥳', '🎉', '🎈', '🎊', '🪔', '🎄', '🌙'];
+const BIRTHDAY_EMOJIS = ['🎂', '🥳', '🎉', '🎈', '🎊', '🪔', '🎄', '🌙', '🥂', '💐', '🪁'];
 
 /**
  * Checks if a message text looks like a birthday, festival, or celebratory wish.

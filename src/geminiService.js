@@ -1,5 +1,46 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
+const BIRTHDAY_TEMPLATES = [
+  (tag) => `Happy Birthday${tag}! Wishing you a wonderful year ahead 🎂🥳`,
+  (tag) => `Many many happy returns of the day${tag}! Have a fantastic birthday 🎉🎂`,
+  (tag) => `Happy Birthday${tag}! Hope you have an amazing day and a great year ahead 🥳✨`,
+  (tag) => `Wishing you a very Happy Birthday${tag}! Stay blessed and keep smiling 🎂🎉`,
+];
+
+const ANNIVERSARY_TEMPLATES = [
+  (tag) => `Happy Anniversary${tag}! Wishing you both many more years of happiness and togetherness 🥂💐✨`,
+  (tag) => `Heartiest congratulations and Happy Wedding Anniversary${tag}! Wishing you both endless love and joy 💐🎉`,
+  (tag) => `Happy Anniversary${tag}! May your bond continue to grow stronger every year 🥂✨`,
+];
+
+const FESTIVAL_TEMPLATES = {
+  diwali: [
+    'Happy Diwali to everyone and your families! May this festival of lights bring joy and prosperity 🪔✨',
+    'Shubh Deepavali to all! Wishing you and your family peace, health, and happiness 🪔🎉',
+  ],
+  'saal mubarak': [
+    'Saal Mubarak to everyone and your families! Wishing you a joyful and prosperous New Year 🙏✨',
+    'Nutan Varshabhinandan & Saal Mubarak to all! May the new year bring health and happiness 🙏🎉',
+  ],
+  holi: [
+    'Happy Holi to everyone! May your year be filled with vibrant colors and happiness 🎨🥳',
+  ],
+  eid: [
+    'Eid Mubarak to everyone and your families! Wishing you peace, joy, and blessings 🌙✨',
+  ],
+  christmas: [
+    'Merry Christmas to everyone! Wishing you warm holidays filled with peace and cheer 🎄✨',
+  ],
+  default: (fest) => [
+    `Happy ${fest} to everyone and your families! Wishing you joy and blessings ✨🎉`,
+    `Warmest wishes on ${fest} to you and your family! 🙏✨`,
+  ],
+};
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 export class GeminiWishService {
   /**
    * @param {object} options
@@ -127,6 +168,7 @@ export class GeminiWishService {
         shouldWish: false,
         eventType: 'other',
         eventKey: 'self_wish_blocked',
+        targetName: '',
         targetJid: null,
         replyText: '',
         reasoning: 'Not enough wishers for someone other than the bot owner.',
@@ -156,7 +198,7 @@ export class GeminiWishService {
         ? `\nIMPORTANT - Already wished in this group today (IGNORE wishes for these people/events and ONLY look for a DIFFERENT person or event that has NOT been wished yet): ${JSON.stringify(alreadyWishedEvents)}\n`
         : '';
 
-    const prompt = `You are helping a WhatsApp user automatically join in on group birthday, anniversary, and festival wishes.
+    const prompt = `You are helping a WhatsApp user automatically join in on group birthday, wedding anniversary, and festival wishes.
 
 Group Name: "${groupName}"
 Bot Owner Name (me): "${myName || 'User'}" (JID: "${myJid || 'unknown'}")
@@ -165,16 +207,20 @@ Recent messages in the group:
 ${formattedMessages}
 
 Instructions:
-1. Multiple people in the same group can have a birthday on the same day! Check if at least ${minWishers} DIFFERENT senders in the recent messages are wishing a specific person (or celebrating a festival) that is NOT in the "Already wished in this group today" list.
+1. Multiple people in the same group can have a birthday/anniversary on the same day! Check if at least ${minWishers} DIFFERENT senders in the recent messages are wishing a specific person/couple (or celebrating a festival) that is NOT in the "Already wished in this group today" list.
 2. IMPORTANT: If the group members are wishing the Bot Owner ("${myName || 'me'}"), or if they are only wishing someone already in the "Already wished" list, set shouldWish = false!
-3. Set eventType to one of: "birthday", "festival", "anniversary", "other".
-4. Set eventKey to a canonical lowercase identifier per person or festival for per-group per-person deduplication:
-   - If a person's JID is mentioned in [Mentions], prefer "birthday:<jid>" (e.g. "birthday:919876543210@s.whatsapp.net")
-   - Else if a person's name is mentioned (e.g. Rahul), use "birthday:rahul"
-   - If it's a festival (e.g. Diwali), use "festival:diwali"
-5. If a specific person's WhatsApp JID appears in [Mentions] for this unwished person, set targetJid to that exact JID (e.g. "919876543210@s.whatsapp.net") and include "@<phone_number>" (e.g. "@919876543210") naturally in replyText, OR use their name if others used their name without tagging. Otherwise set targetJid to "".
-6. Write replyText on behalf of the user following this style guide:
-   ${this.userStylePrompt}`;
+3. Set eventType to one of: "birthday", "anniversary", "festival", "other".
+4. Set targetName to the human-readable name of who or what is being wished (e.g., "Rahul", "Krunal & Bhavna", "Diwali", "Saal Mubarak").
+5. Set eventKey to a canonical lowercase identifier per person, couple, or festival for per-group per-person deduplication:
+   - Birthday: "birthday:<jid>" if tagged in [Mentions], else "birthday:<name>" (e.g. "birthday:rahul")
+   - Anniversary: "anniversary:<jid>" if tagged, else "anniversary:<names>" (e.g. "anniversary:rahul_priya")
+   - Festival: "festival:<name>" (e.g. "festival:diwali", "festival:saal_mubarak")
+6. If a specific person's WhatsApp JID appears in [Mentions] for this unwished person, set targetJid to that exact JID (e.g. "919876543210@s.whatsapp.net") and include "@<phone_number>" (e.g. "@919876543210") naturally in replyText, OR use their name if others used their name without tagging. Otherwise set targetJid to "".
+7. Craft a distinct, natural replyText tailored specifically to the eventType:
+   - If "birthday": Write a warm, natural birthday wish for that person (vary your wording naturally—do not use the exact same phrase every time).
+   - If "anniversary": Write a warm wedding/couple anniversary wish (e.g. wishing them both love, happiness, and many more wonderful years together 🥂💐).
+   - If "festival": Write a festive greeting tailored specifically to that festival and matching the group's cultural vibe/language (e.g., Diwali 🪔, Saal Mubarak / Nutan Varshabhinandan 🙏, Uttarayan 🪁, Holi 🎨, Eid 🌙, Christmas 🎄).
+   - Style guide: ${this.userStylePrompt}`;
 
     const schemaConfig = {
       responseMimeType: 'application/json',
@@ -183,15 +229,19 @@ Instructions:
         properties: {
           shouldWish: {
             type: Type.BOOLEAN,
-            description: 'True if at least minWishers unique people are wishing an unwished person/festival.',
+            description: 'True if at least minWishers unique people are wishing an unwished person/couple/festival.',
           },
           eventType: {
             type: Type.STRING,
-            description: 'birthday, festival, anniversary, or other',
+            description: 'birthday, anniversary, festival, or other',
+          },
+          targetName: {
+            type: Type.STRING,
+            description: 'Human-readable name of the person, couple, or festival being wished',
           },
           eventKey: {
             type: Type.STRING,
-            description: 'Canonical lowercase identifier like birthday:rahul or birthday:919876543210@s.whatsapp.net or festival:diwali',
+            description: 'Canonical lowercase identifier like birthday:rahul, anniversary:rahul_priya, or festival:diwali',
           },
           targetJid: {
             type: Type.STRING,
@@ -206,7 +256,15 @@ Instructions:
             description: 'Brief explanation of the decision',
           },
         },
-        required: ['shouldWish', 'eventType', 'eventKey', 'targetJid', 'replyText', 'reasoning'],
+        required: [
+          'shouldWish',
+          'eventType',
+          'targetName',
+          'eventKey',
+          'targetJid',
+          'replyText',
+          'reasoning',
+        ],
       },
     };
 
@@ -237,6 +295,7 @@ Instructions:
       return {
         shouldWish: Boolean(parsed.shouldWish),
         eventType: parsed.eventType || 'other',
+        targetName: (parsed.targetName || parsed.eventKey || 'someone').trim(),
         eventKey: parsed.eventKey || 'general_wish',
         targetJid: parsed.targetJid ? parsed.targetJid.trim() : null,
         replyText: (parsed.replyText || '').trim(),
@@ -254,15 +313,13 @@ Instructions:
 
   /**
    * Rule-based fallback if GEMINI_API_KEY is not configured or API fails.
-   * Groups wishes per person/mention so multiple birthdays on the same day work even in fallback mode!
+   * Generates distinct messages for birthdays, anniversaries, and specific festivals.
    */
   _fallbackGenerate({ messages, alreadyWishedEvents = [], minWishers = 2 }) {
     const alreadySet = new Set(alreadyWishedEvents.map((e) => e.toLowerCase()));
-
-    // Map candidate eventKey -> { senders: Set, targetJid: string|null, displayTarget: string, type: string }
     const candidates = new Map();
 
-    const addCandidate = (key, senderJid, targetJid, displayTarget, type) => {
+    const addCandidate = (key, senderJid, targetJid, displayTarget, targetName, type) => {
       const normKey = key.toLowerCase();
       if (alreadySet.has(normKey)) return;
       if (!candidates.has(normKey)) {
@@ -271,6 +328,7 @@ Instructions:
           senders: new Set(),
           targetJid,
           displayTarget,
+          targetName,
           type,
         });
       }
@@ -279,13 +337,43 @@ Instructions:
 
     for (const m of messages) {
       const text = m.text || '';
+
+      // 1. Check Anniversary
+      if (/\b(?:anniversary|salgirah)\b/i.test(text)) {
+        if (m.mentionedJids && m.mentionedJids.length > 0) {
+          const jid = m.mentionedJids[0];
+          const num = jid.split('@')[0];
+          addCandidate(`anniversary:${jid}`, m.senderJid, jid, ` @${num}`, `@${num}`, 'anniversary');
+        } else {
+          const nameMatch = text.match(
+            /\b(?:anniversary|salgirah(?:\s+mubarak)?)\s+(?:to\s+|dear\s+)?([A-Z][a-z]{2,15}(?:\s*(?:&|and)\s*[A-Z][a-z]{2,15})?)\b/
+          );
+          const name = nameMatch ? nameMatch[1].trim() : 'both of you';
+          addCandidate(
+            `anniversary:${name.toLowerCase().replace(/\s+/g, '_')}`,
+            m.senderJid,
+            null,
+            name !== 'both of you' ? ` ${name}` : '',
+            name,
+            'anniversary'
+          );
+        }
+        continue;
+      }
+
+      // 2. Check Birthday
       if (/\b(?:bday|b'day|birthday|hbd|janamdin|returns)\b/i.test(text)) {
         if (m.mentionedJids && m.mentionedJids.length > 0) {
           for (const jid of m.mentionedJids) {
-            addCandidate(`birthday:${jid}`, m.senderJid, jid, `@${jid.split('@')[0]}`, 'birthday');
+            const num = jid.split('@')[0];
+            // Also try extracting their spoken name from the message text if present
+            const spokenNameMatch = text.match(
+              /\b(?:birthday|bday|b'day|hbd|day)\s+(?:@[0-9]+\s+)?([A-Z][a-z]{2,15})\b/
+            );
+            const humanName = spokenNameMatch ? spokenNameMatch[1] : `@${num}`;
+            addCandidate(`birthday:${jid}`, m.senderJid, jid, ` @${num}`, humanName, 'birthday');
           }
         } else {
-          // Try extracting a name after birthday/hbd/day
           const nameMatch = text.match(
             /\b(?:birthday|bday|b'day|hbd|day)\s+(?:to\s+|dear\s+)?([A-Z][a-z]{2,15})\b/
           );
@@ -295,42 +383,65 @@ Instructions:
             m.senderJid,
             null,
             name !== 'general' ? ` ${name}` : '',
+            name !== 'general' ? name : 'Birthday Person',
             'birthday'
           );
         }
+        continue;
       }
 
-      const festivalMatch = text.match(
-        /\b(?:happy|shubh|merry)\s+(diwali|deepavali|holi|navratri|dussehra|christmas|new\s+year|eid|pongal|onam|ganesh\s+chaturthi|raksha\s+bandhan|janmashtami)\b/i
-      );
-      if (festivalMatch) {
-        const fest = festivalMatch[1];
-        addCandidate(`festival:${fest.toLowerCase()}`, m.senderJid, null, fest, 'festival');
+      // 3. Check Festivals
+      if (/\b(?:saal\s+mubarak|nutan\s+varshabhinandan)\b/i.test(text)) {
+        addCandidate('festival:saal_mubarak', m.senderJid, null, 'Saal Mubarak', 'Saal Mubarak', 'festival');
       } else if (/\beid\s+mubarak\b/i.test(text)) {
-        addCandidate('festival:eid', m.senderJid, null, 'Eid', 'festival');
+        addCandidate('festival:eid', m.senderJid, null, 'Eid', 'Eid', 'festival');
+      } else {
+        const festivalMatch = text.match(
+          /\b(?:happy|shubh|merry)\s+(diwali|deepavali|holi|dhuleti|navratri|dussehra|christmas|new\s+year|eid|pongal|onam|uttarayan|makar\s+sankranti|ganesh\s+chaturthi|raksha\s+bandhan|janmashtami|dhanteras|maha\s+shivratri)\b/i
+        );
+        if (festivalMatch) {
+          const fest = festivalMatch[1];
+          addCandidate(`festival:${fest.toLowerCase()}`, m.senderJid, null, fest, fest, 'festival');
+        }
       }
     }
 
     for (const cand of candidates.values()) {
       if (cand.senders.size >= minWishers) {
         if (cand.type === 'birthday') {
-          const tagPart = cand.targetJid ? ` ${cand.displayTarget}` : cand.displayTarget;
+          const templateFn = pickRandom(BIRTHDAY_TEMPLATES);
           return {
             shouldWish: true,
             eventType: 'birthday',
+            targetName: cand.targetName,
             eventKey: cand.eventKey,
             targetJid: cand.targetJid,
-            replyText: `Happy Birthday${tagPart}! Wishing you a great year ahead 🎂🥳`,
+            replyText: templateFn(cand.displayTarget),
             reasoning: 'Fallback rule-based per-person birthday detection',
           };
         }
+        if (cand.type === 'anniversary') {
+          const templateFn = pickRandom(ANNIVERSARY_TEMPLATES);
+          return {
+            shouldWish: true,
+            eventType: 'anniversary',
+            targetName: cand.targetName,
+            eventKey: cand.eventKey,
+            targetJid: cand.targetJid,
+            replyText: templateFn(cand.displayTarget),
+            reasoning: 'Fallback rule-based per-couple anniversary detection',
+          };
+        }
         if (cand.type === 'festival') {
+          const festKey = cand.displayTarget.toLowerCase();
+          const pool = FESTIVAL_TEMPLATES[festKey] || FESTIVAL_TEMPLATES.default(cand.displayTarget);
           return {
             shouldWish: true,
             eventType: 'festival',
+            targetName: cand.targetName,
             eventKey: cand.eventKey,
             targetJid: null,
-            replyText: `Happy ${cand.displayTarget} to everyone and your families! ✨🎉`,
+            replyText: pickRandom(pool),
             reasoning: `Fallback rule-based festival detection (${cand.displayTarget})`,
           };
         }
@@ -340,6 +451,7 @@ Instructions:
     return {
       shouldWish: false,
       eventType: 'other',
+      targetName: '',
       eventKey: 'unknown',
       targetJid: null,
       replyText: '',

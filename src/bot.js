@@ -317,6 +317,12 @@ export class WhatsAppWishBot {
               `🧪 [DRY RUN] [${groupName}] Would have sent wish (${normEventKey}): "${analysis.replyText}"`
             );
             this.stateStore.recordWish(remoteJid, normEventKey);
+            await this.notifySelf({
+              targetName: analysis.targetName || normEventKey,
+              replyText: analysis.replyText,
+              groupName,
+              isDryRun: true,
+            });
             return;
           }
 
@@ -336,6 +342,13 @@ export class WhatsAppWishBot {
           console.log(
             `✅ [${groupName}] Sent auto-wish (${normEventKey}): "${analysis.replyText}" (Next wish for ${normEventKey} allowed after ${config.cooldownHours}h)`
           );
+
+          await this.notifySelf({
+            targetName: analysis.targetName || normEventKey,
+            replyText: analysis.replyText,
+            groupName,
+            isDryRun: false,
+          });
         } catch (sendErr) {
           console.error(`[Bot] Failed to send wish in "${groupName}":`, sendErr.message);
         }
@@ -344,6 +357,24 @@ export class WhatsAppWishBot {
       this.pendingTimers.set(timerKey, timer);
     } finally {
       this.inFlightGroups.delete(remoteJid);
+    }
+  }
+
+  /**
+   * Sends a confirmation message to your own WhatsApp "Message Yourself" chat
+   * right after the bot wishes someone in a group.
+   */
+  async notifySelf({ targetName, replyText, groupName, isDryRun = false }) {
+    try {
+      const rawMyId = this.sock?.user?.id;
+      if (!rawMyId) return;
+      const mySelfJid = `${rawMyId.split(':')[0].split('@')[0]}@s.whatsapp.net`;
+      const prefix = isDryRun ? '🧪 [DRY RUN] ' : '🤖 ';
+      const summary = `${prefix}Wished ${targetName} "${replyText}" in group chat "${groupName}"`;
+      await this.sock.sendMessage(mySelfJid, { text: summary });
+      console.log(`📩 Sent self-notification to your WhatsApp: ${summary}`);
+    } catch (err) {
+      console.warn('[Bot] Could not send self-notification DM:', err.message);
     }
   }
 }
