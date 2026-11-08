@@ -113,25 +113,32 @@ export class GeminiWishService {
         const version = verMatch ? parseFloat(verMatch[1]) : 0;
         const isLite = rawName.includes('lite');
         const isPreview = rawName.includes('preview');
+        const isLatestAlias = rawName === 'gemini-flash-lite-latest';
 
         candidates.push({
           name: rawName,
           version,
           isLite,
           isPreview,
+          isLatestAlias,
         });
       }
 
       if (candidates.length > 0) {
+        // Prioritize:
+        // 1. 'flash-lite' models first (fastest, lightest, no slow thinking delay)
+        // 2. Stable over preview
+        // 3. Highest version number (e.g. 3.8 > 3.5 > 3.0 > 2.5)
         candidates.sort((a, b) => {
-          if (b.version !== a.version) return b.version - a.version;
           if (a.isLite !== b.isLite) return a.isLite ? -1 : 1;
           if (a.isPreview !== b.isPreview) return a.isPreview ? 1 : -1;
+          if (b.version !== a.version) return b.version - a.version;
+          if (a.isLatestAlias !== b.isLatestAlias) return a.isLatestAlias ? -1 : 1;
           return a.name.length - b.name.length;
         });
 
         this.resolvedModel = candidates[0].name;
-        console.log(`🤖 [Gemini] Auto-selected model: ${this.resolvedModel}`);
+        console.log(`🤖 [Gemini] Auto-selected lite model: ${this.resolvedModel}`);
         return this.resolvedModel;
       }
     } catch (err) {

@@ -40,6 +40,8 @@ export class WhatsAppWishBot {
     this.pendingTimers = new Map();
     // Set of groupIds currently being analyzed by Gemini to avoid concurrent duplicate triggers
     this.inFlightGroups = new Set();
+    // Set of message IDs sent by the bot itself so it never reacts to its own auto-replies
+    this.sentByBotIds = new Set();
     this.sock = null;
     this.pairingRequested = false;
   }
@@ -215,8 +217,14 @@ export class WhatsAppWishBot {
       return;
     }
 
-    // If YOU manually sent a wish in this group from your phone, cancel any pending auto-wish for this group
-    if (msg.key.fromMe) {
+    // Never react to a message that the bot itself just sent!
+    if (msg.key?.id && this.sentByBotIds.has(msg.key.id)) {
+      return;
+    }
+
+    // If YOU manually sent a wish in this group from your phone (and self-triggering is not enabled),
+    // cancel any pending auto-wish for this group.
+    if (msg.key.fromMe && !config.dryRun && !config.allowSelfTrigger) {
       if (looksLikeWish(text)) {
         for (const [timerKey, timer] of this.pendingTimers.entries()) {
           if (timerKey.startsWith(`${remoteJid}::`)) {
@@ -230,8 +238,13 @@ export class WhatsAppWishBot {
       return;
     }
 
-    const senderJid = msg.key.participant || msg.participant || '';
-    const senderName = msg.pushName || senderJid.split('@')[0];
+    const isSelfTest = Boolean(msg.key.fromMe && (config.dryRun || config.allowSelfTrigger));
+    const senderJid = isSelfTest
+      ? 'dryrun_tester@s.whatsapp.net'
+      : msg.key.participant || msg.participant || '';
+    const senderName = isSelfTest
+      ? 'Group Member'
+      : msg.pushName || senderJid.split('@')[0];
 
     const trackResult = this.wishTracker.addMessage({
       groupId: remoteJid,
@@ -336,8 +349,13 @@ export class WhatsAppWishBot {
             payload.mentions = [analysis.targetJid];
           }
 
-          await this.sock.sendMessage(remoteJid, payload);
+          // Record cooldown BEFORE sending so the outgoing message upsert never re-triggers
           this.stateStore.recordWish(remoteJid, normEventKey);
+
+          const sentMsg = await this.sock.sendMessage(remoteJid, payload);
+          if (sentMsg?.key?.id) {
+            this.sentByBotIds.add(sentMsg.key.id);
+          }
 
           console.log(
             `✅ [${groupName}] Sent auto-wish (${normEventKey}): "${analysis.replyText}" (Next wish for ${normEventKey} allowed after ${config.cooldownHours}h)`

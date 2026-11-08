@@ -24,6 +24,7 @@ export const config = {
   maxDelaySeconds: Math.max(10, parseInt(process.env.MAX_DELAY_SECONDS || '180', 10)),
   maxDailyGeminiCalls: Math.max(1, parseInt(process.env.MAX_DAILY_GEMINI_CALLS || '20', 10)),
   dryRun: String(process.env.DRY_RUN || 'false').toLowerCase() === 'true',
+  allowSelfTrigger: String(process.env.ALLOW_SELF_TRIGGER || 'false').toLowerCase() === 'true',
   userStylePrompt:
     process.env.USER_STYLE_PROMPT ||
     'Keep it warm, natural, casual, and concise (1 short sentence). Match the language/vibe of the other group members. Do not sound overly formal or robotic.',
