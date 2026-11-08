@@ -85,3 +85,30 @@ test('StateStore enforces at least 2-day (48h) cooldown before wishing again', (
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('StateStore allows multiple people to have birthdays on the same day in the same group', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wishbot-multi-'));
+  try {
+    const store = new StateStore(tmpDir, { cooldownHours: 48 });
+    const groupId = '120363156175890746@g.us';
+    const t0 = 1_700_000_000_000;
+
+    // 1. Wish Rahul in this group
+    store.recordWish(groupId, 'birthday:rahul', t0);
+
+    // 10 minutes later on the SAME day:
+    const t10m = t0 + 10 * 60 * 1000;
+
+    // Rahul is on cooldown in this group:
+    assert.equal(store.canWish(groupId, 'birthday:rahul', t10m).allowed, false);
+    assert.deepEqual(store.getActiveEventsForGroup(groupId, t10m), ['birthday:rahul']);
+
+    // Priya ALSO has a birthday on the same day in the SAME group -> allowed!
+    assert.equal(store.canWish(groupId, 'birthday:priya', t10m).allowed, true);
+
+    // Rahul in a DIFFERENT group -> also allowed independently!
+    assert.equal(store.canWish('other_group@g.us', 'birthday:rahul', t10m).allowed, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

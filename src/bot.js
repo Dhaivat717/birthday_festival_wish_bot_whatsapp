@@ -162,11 +162,16 @@ export class WhatsAppWishBot {
       console.log(`\n📋 Found ${entries.length} WhatsApp groups.`);
       const whitelisted = entries.filter((g) => this.isGroupAllowed(g.id, g.subject));
 
+      // Also save all groups to data/groups_list.txt for easy searching
+      const groupLines = entries.map((g, idx) => `${idx + 1}. "${g.subject}" (${g.id})`);
+      const groupsFilePath = path.join(config.dataDir, 'groups_list.txt');
+      fs.writeFileSync(groupsFilePath, groupLines.join('\n') + '\n', 'utf8');
+
       if (config.allowedGroups.length === 0) {
         console.log('⚠️  ALLOWED_GROUPS is currently empty in .env! The bot will NOT reply in any group yet.');
-        console.log('Here are your groups so you can add their names or IDs to ALLOWED_GROUPS in .env:');
-        entries.slice(0, 30).forEach((g) => {
-          console.log(`   - "${g.subject}" (${g.id})`);
+        console.log(`Here are all ${entries.length} of your groups (also saved to ${groupsFilePath}):`);
+        entries.forEach((g, idx) => {
+          console.log(`   ${idx + 1}. "${g.subject}" (${g.id})`);
         });
       } else {
         console.log(`🛡️  Whitelisted active groups (${whitelisted.length}):`);
@@ -175,7 +180,7 @@ export class WhatsAppWishBot {
         }
       }
       console.log(
-        `⚙️  Rules: Trigger after ${config.minWishers} unique wishers within ${config.windowMinutes}m | Cooldown: ${config.cooldownHours}h (${(config.cooldownHours / 24).toFixed(1)} days)\n`
+        `⚙️  Rules: Trigger after ${config.minWishers} unique wishers within ${config.windowMinutes}m | Cooldown: ${config.cooldownHours}h (${(config.cooldownHours / 24).toFixed(1)} days) | Mode: ${config.dryRun ? '🧪 DRY RUN (Logs only, no messages sent)' : '🟢 LIVE'}\n`
       );
     } catch (err) {
       console.error('[Bot] Could not fetch group list:', err.message);
@@ -210,14 +215,15 @@ export class WhatsAppWishBot {
       return;
     }
 
-    // If YOU manually sent a wish in this group from your phone, cancel any pending auto-wish
-    // and record cooldown so the bot won't send a redundant wish after you!
+    // If YOU manually sent a wish in this group from your phone, cancel any pending auto-wish for this group
     if (msg.key.fromMe) {
       if (looksLikeWish(text)) {
-        if (this.pendingTimers.has(remoteJid)) {
-          clearTimeout(this.pendingTimers.get(remoteJid));
-          this.pendingTimers.delete(remoteJid);
-          console.log(`[Bot] Cancelled pending auto-wish in "${groupName}" because you manually wished.`);
+        for (const [timerKey, timer] of this.pendingTimers.entries()) {
+          if (timerKey.startsWith(`${remoteJid}::`)) {
+            clearTimeout(timer);
+            this.pendingTimers.delete(timerKey);
+            console.log(`[Bot] Cancelled pending auto-wish (${timerKey}) in "${groupName}" because you manually wished.`);
+          }
         }
         this.wishTracker.clearGroup(remoteJid);
       }
@@ -242,8 +248,8 @@ export class WhatsAppWishBot {
     );
 
     if (!trackResult.readyToTrigger) return;
-    if (this.pendingTimers.has(remoteJid) || this.inFlightGroups.has(remoteJid)) {
-      return; // Already analyzing or scheduled a reply for this group
+    if (this.inFlightGroups.has(remoteJid)) {
+      return; // Already analyzing this group
     }
 
     this.inFlightGroups.add(remoteJid);
@@ -251,23 +257,41 @@ export class WhatsAppWishBot {
       const myJid = this.sock.user?.id || '';
       const myName = this.sock.user?.name || '';
 
+      // Gather all people/events already wished in this group today (or currently scheduled)
+      const alreadyWishedEvents = [
+        ...this.stateStore.getActiveEventsForGroup(remoteJid),
+        ...[...this.pendingTimers.keys()]
+          .filter((k) => k.startsWith(`${remoteJid}::`))
+          .map((k) => k.slice(`${remoteJid}::`.length)),
+      ];
+
       const analysis = await this.gemini.analyzeAndGenerateWish({
         groupName,
         messages: trackResult.recentMessages,
         myJid,
         myName,
+        alreadyWishedEvents,
+        minWishers: config.minWishers,
       });
+
+      // Clear the current window buffer so subsequent messages require a fresh pair of wishers
+      this.wishTracker.clearGroup(remoteJid);
 
       if (!analysis.shouldWish || !analysis.replyText) {
         console.log(`🤖 [${groupName}] Skipped auto-wish: ${analysis.reasoning}`);
         return;
       }
 
-      // Check 2-day (48h) cooldown for this group + eventKey
-      const cooldownCheck = this.stateStore.canWish(remoteJid, analysis.eventKey);
+      const normEventKey = StateStore.normalizeKey(analysis.eventKey);
+      const timerKey = `${remoteJid}::${normEventKey}`;
+      if (this.pendingTimers.has(timerKey)) {
+        return;
+      }
+
+      // Check 2-day (48h) cooldown for this group + specific person/eventKey
+      const cooldownCheck = this.stateStore.canWish(remoteJid, normEventKey);
       if (!cooldownCheck.allowed) {
         console.log(`⏳ [${groupName}] Cooldown active: ${cooldownCheck.reason}`);
-        this.wishTracker.clearGroup(remoteJid);
         return;
       }
 
@@ -278,22 +302,21 @@ export class WhatsAppWishBot {
         ) + config.minDelaySeconds;
 
       console.log(
-        `⏰ [${groupName}] Scheduled "${analysis.eventKey}" wish in ${delaySec}s: "${analysis.replyText}"`
+        `⏰ [${groupName}] Scheduled "${normEventKey}" wish in ${delaySec}s: "${analysis.replyText}"`
       );
 
       const timer = setTimeout(async () => {
-        this.pendingTimers.delete(remoteJid);
+        this.pendingTimers.delete(timerKey);
         try {
           // Double check cooldown right before sending
-          const recheck = this.stateStore.canWish(remoteJid, analysis.eventKey);
+          const recheck = this.stateStore.canWish(remoteJid, normEventKey);
           if (!recheck.allowed) return;
 
           if (config.dryRun) {
             console.log(
-              `🧪 [DRY RUN] [${groupName}] Would have sent wish (${analysis.eventKey}): "${analysis.replyText}"`
+              `🧪 [DRY RUN] [${groupName}] Would have sent wish (${normEventKey}): "${analysis.replyText}"`
             );
-            this.stateStore.recordWish(remoteJid, analysis.eventKey);
-            this.wishTracker.clearGroup(remoteJid);
+            this.stateStore.recordWish(remoteJid, normEventKey);
             return;
           }
 
@@ -308,18 +331,17 @@ export class WhatsAppWishBot {
           }
 
           await this.sock.sendMessage(remoteJid, payload);
-          this.stateStore.recordWish(remoteJid, analysis.eventKey);
-          this.wishTracker.clearGroup(remoteJid);
+          this.stateStore.recordWish(remoteJid, normEventKey);
 
           console.log(
-            `✅ [${groupName}] Sent auto-wish (${analysis.eventKey}): "${analysis.replyText}" (Next wish allowed after ${config.cooldownHours}h)`
+            `✅ [${groupName}] Sent auto-wish (${normEventKey}): "${analysis.replyText}" (Next wish for ${normEventKey} allowed after ${config.cooldownHours}h)`
           );
         } catch (sendErr) {
           console.error(`[Bot] Failed to send wish in "${groupName}":`, sendErr.message);
         }
       }, delaySec * 1000);
 
-      this.pendingTimers.set(remoteJid, timer);
+      this.pendingTimers.set(timerKey, timer);
     } finally {
       this.inFlightGroups.delete(remoteJid);
     }
