@@ -2,71 +2,112 @@
 
 A lightweight, 24/7 WhatsApp group auto-reply bot built with **Node.js**, **`@whiskeysockets/baileys`**, and **Google Gemini (`gemini-2.5-flash`)**.
 
-## Why This Stack for 24/7 Always-On Operation (Even When Your Computer Sleeps)
-
-1. **WhatsApp Multi-Device WebSocket Protocol (`@whiskeysockets/baileys`)**:
-   - Links as a companion device on your WhatsApp account (just like WhatsApp Web/Desktop).
-   - Once hosted in the cloud, **neither your laptop nor your phone needs to stay awake**.
-   - Uses pure WebSockets (~40MB RAM) instead of launching a heavy headless Chrome browser (`whatsapp-web.js` uses 500MB–1GB+ RAM), so it runs reliably on the smallest/cheapest cloud containers or free-tier VMs.
-2. **Cloud-Friendly Phone Pairing Code**:
-   - Supports linking via an **8-character Pairing Code** (`PAIRING_PHONE_NUMBER` in `.env`) in addition to QR codes, making it effortless to link from cloud server logs.
+When multiple people in a whitelisted WhatsApp group start wishing someone a Happy Birthday, Happy Anniversary, or celebrating a festival (e.g., Diwali, Eid, Christmas, Holi, New Year), this bot detects the trend, verifies the occasion with Gemini AI, waits a natural human-like delay, and sends a warm wish on your behalf—while enforcing a strict **2-day (48-hour) cooldown** so it never repeats itself.
 
 ---
 
-## Key Features
+## How the Code Works (Architecture & Pipeline)
 
-- **Group Whitelist (`ALLOWED_GROUPS`)**: Only monitors and replies in groups you explicitly allow (matched by Group Name or Group ID).
-- **Hybrid Detection (`MIN_WISHERS=2` or `3`)**:
-  1. Fast local regex/keyword filter detects potential birthday, anniversary, and festival wishes in a sliding window (`WINDOW_MINUTES=45`).
-  2. Once `MIN_WISHERS` unique group members wish within the window, **Gemini (`gemini-2.5-flash`)** analyzes the messages to confirm the occasion, identify who is being wished, and write a natural, warm 1-sentence wish matching the group's language/vibe.
-  3. **Self-Wish Protection**: Automatically detects if the group is wishing *you* on your own birthday and skips auto-replying.
-- **Strict >= 2-Day Cooldown (`COOLDOWN_HOURS=48`)**:
-  - Persists wish history in `data/wish_history.json` so it enforces at least a **2-day (48-hour) delay** before wishing the same event/person again (and optionally `GROUP_GLOBAL_COOLDOWN_HOURS=48` if you want at least 2 days between *any* two wishes in the same group).
-- **Human-like Random Delay & Manual Override**:
-  - Waits a random delay (`45s–180s` by default) and sends a 3-second `"typing..."` indicator before sending.
-  - If you manually send a wish from your phone during the delay countdown, the bot automatically cancels its pending auto-wish.
+```mermaid
+flowchart TD
+    A["Incoming WhatsApp Message (Baileys WebSocket)"] --> B{"Is Group Chat & in ALLOWED_GROUPS?"}
+    B -- No --> Z["Ignore Message"]
+    B -- Yes --> C{"Was Message Sent by Me (fromMe)?"}
+    C -- Yes --> D["If I manually sent a wish, cancel any pending auto-wish timer & reset group buffer"]
+    C -- No --> E["Stage 1: Local Fast Pre-Filter (looksLikeWish)"]
+    E -- Not a wish --> Z
+    E -- Matches wish pattern/emoji --> F["Add to Group Sliding Window Buffer (default: 45 mins)"]
+    F --> G{"Unique Wishers in Window >= MIN_WISHERS (e.g. 2)?"}
+    G -- No --> Z
+    G -- Yes --> H["Stage 2: Gemini AI Analysis (analyzeAndGenerateWish)"]
+    H --> I{"Is Genuine Wish & Not Wishing Me?"}
+    I -- No --> Z
+    I -- Yes --> J{"Stage 3: StateStore Cooldown Check (>= 48 Hours)"}
+    J -- Cooldown Active --> Z
+    J -- Allowed --> K["Schedule Random Human Delay (45s - 180s)"]
+    K --> L["Send 3s 'typing...' Presence + Send Wish Message"]
+    L --> M["Record Event Timestamp in data/wish_history.json (48h Lock)"]
+```
+
+### Step-by-Step Execution Flow
+
+1. **Persistent WhatsApp Multi-Device Connection (`src/bot.js`)**
+   - Uses `@whiskeysockets/baileys` to connect directly to WhatsApp's WebSocket servers as a linked device (no headless Chrome browser needed, ~40MB RAM).
+   - Saves your encrypted WhatsApp session credentials inside `data/auth_info_baileys/` so restarts or redeployments never require re-linking.
+   - Supports linking via either a **QR Code** in the terminal or an **8-character Phone Pairing Code** (`PAIRING_PHONE_NUMBER` env var) for easy setup from cloud logs.
+
+2. **Group Whitelist & Manual Override (`src/bot.js`)**
+   - Every incoming message is checked against `ALLOWED_GROUPS` (which matches either the group's human-readable name like `"Family"` or its WhatsApp JID like `1203630...@g.us`).
+   - **Manual Override**: If *you* send a wish manually from your phone (`msg.key.fromMe === true`), the bot immediately cancels any pending countdown timer for that group and clears the buffer so it never sends a duplicate wish after you already replied.
+
+3. **Stage 1: Fast Local Pre-Filter & Sliding Window (`src/wishDetector.js`)**
+   - Rather than calling the Gemini API on every single group chat message, `looksLikeWish()` runs a zero-latency local check for birthday keywords (`happy birthday`, `hbd`, `bday`, `many happy returns`, `janamdin`), festival greetings (`happy diwali`, `eid mubarak`, `merry christmas`, `happy holi`, `happy navratri`, `happy new year`, etc.), and celebratory emojis (`🎂`, `🥳`, `🎉`, `🪔`).
+   - Matching messages are stored in an in-memory per-group sliding window (`WINDOW_MINUTES`, default `45` minutes).
+   - `WishTracker` counts the number of **unique senders** who have wished in that group during the window. Once `uniqueWisherCount >= MIN_WISHERS` (default `2`), it triggers Stage 2.
+
+4. **Stage 2: Gemini AI Verification & Personalized Reply (`src/geminiService.js`)**
+   - Sends the batch of recent wish messages from that group (along with sender names and `@mentioned` JIDs) to `gemini-2.5-flash` using a strict JSON schema:
+     - **Self-Wish Protection**: Checks if group members are tagging or wishing *you* (the bot owner). If it's your own birthday, it blocks auto-replying!
+     - **Canonical Event Key (`eventKey`)**: Extracts a normalized key such as `birthday:rahul`, `birthday:919876543210@s.whatsapp.net`, or `festival:diwali`.
+     - **Tone-Matched Wish (`replyText`)**: Generates a short, natural wish matching the language and vibe of the group, tagging the birthday person (`@mention`) if others tagged them.
+   - Includes an automatic rule-based template fallback if `GEMINI_API_KEY` is not set.
+
+5. **Stage 3: Persistent 2-Day Cooldown (`src/stateStore.js`)**
+   - Before scheduling a message, `StateStore.canWish(groupId, eventKey)` checks `data/wish_history.json`.
+   - Enforces at least a **48-hour (2-day) cooldown** (`COOLDOWN_HOURS=48`) per `(groupId, eventKey)` so the bot never wishes for the same person or festival twice within 2 days.
+   - Optionally also supports `GROUP_GLOBAL_COOLDOWN_HOURS=48` to enforce a 2-day minimum gap between *any* two auto-wishes in the same group.
+
+6. **Stage 4: Human-Like Delay & Typing Indicator (`src/bot.js`)**
+   - Waits a random delay between `MIN_DELAY_SECONDS` (`45s`) and `MAX_DELAY_SECONDS` (`180s`) so your reply never appears instantaneously after the Nth person's message.
+   - Right before sending, sends a `composing` ("typing...") presence update to the group for 3 seconds, sends the message, and saves the cooldown timestamp to disk.
 
 ---
 
-## Quick Start (Local Setup)
+## Project Structure
+
+| File | Responsibility |
+| --- | --- |
+| `src/index.js` | Application entrypoint and optional HTTP healthcheck server (`PORT`) for cloud hosts. |
+| `src/config.js` | Loads and validates environment variables from `.env`. |
+| `src/bot.js` | Manages the Baileys WhatsApp socket, group whitelist, manual-wish cancellation, and delayed sending. |
+| `src/wishDetector.js` | Fast regex/emoji wish detector (`looksLikeWish`) and per-group sliding-window aggregator (`WishTracker`). |
+| `src/geminiService.js` | Calls Google Gemini (`@google/genai`) with structured JSON output to verify wishes and craft replies. |
+| `src/stateStore.js` | Persists wish timestamps in `data/wish_history.json` and enforces the >= 48-hour (2-day) cooldown. |
+| `tests/wishBot.test.js` | Automated unit tests for wish detection, unique wisher counting, and 48-hour cooldown enforcement. |
+| `Dockerfile` & `railway.json` | Container and Railway deployment configuration with `/app/data` volume mount. |
+
+---
+
+## Local Setup & Testing
 
 1. **Install dependencies**:
    ```bash
    npm install
    ```
-
-2. **Create your `.env` file**:
+2. **Configure environment variables**:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` and set:
-   - `GEMINI_API_KEY`: Your free Gemini API key from https://aistudio.google.com/apikey
-   - `ALLOWED_GROUPS`: Comma-separated group names (e.g. `Family,College Friends,Work`)
-
-3. **Start the bot**:
+   Fill in `GEMINI_API_KEY` and `ALLOWED_GROUPS` in `.env`.
+3. **Run unit tests**:
+   ```bash
+   npm test
+   ```
+4. **Start the bot**:
    ```bash
    npm start
    ```
-   Scan the QR code printed in your terminal (or set `PAIRING_PHONE_NUMBER` in `.env` to get an 8-digit pairing code). On startup, the bot also prints all your WhatsApp group names and IDs so you can easily copy them into `ALLOWED_GROUPS`.
+   On first run, scan the QR code printed in the terminal (or set `PAIRING_PHONE_NUMBER` in `.env` to receive an 8-digit pairing code). The bot will also list all your WhatsApp groups so you can easily copy their names or IDs into `ALLOWED_GROUPS`.
 
 ---
 
-## Running 24/7 (When Your Computer is Asleep)
+## 24/7 Cloud Deployment on Railway
 
-To keep the bot running 24/7 while your laptop is closed/asleep, deploy it to a cloud host with a **persistent volume** mounted at `/app/data` (so your WhatsApp login session and 2-day cooldown state survive restarts):
-
-### Option A: Railway (Easiest Cloud Deploy)
-1. Push this repo to a private GitHub repository.
-2. Create a new project on Railway from your GitHub repo (it will automatically detect [Dockerfile](./Dockerfile) and [railway.json](./railway.json)).
-3. Add a **Volume** mounted at `/app/data`.
-4. Add your `.env` variables in Railway's **Variables** tab (set `PAIRING_PHONE_NUMBER` to your phone number with country code so Railway prints an 8-digit login code in the deploy logs).
-
-### Option B: Free 24/7 Cloud VM (Oracle Cloud Free Tier / GCP e2-micro / AWS Free Tier)
-1. SSH into your Linux VM, clone this repo, and create `.env`.
-2. Run with Docker Compose or PM2:
-   ```bash
-   npm install -g pm2
-   pm2 start src/index.js --name whatsapp-wish-bot
-   pm2 save
-   pm2 startup
-   ```
+1. Push this repository to GitHub and connect it to your **Railway** service (`whatsapp-wish-bot`).
+2. Attach a persistent **Volume** mounted at `/app/data` (already provisioned if using the pre-configured Railway service).
+3. In the Railway **Variables** tab, configure:
+   - `GEMINI_API_KEY`: Your Google Gemini API key
+   - `ALLOWED_GROUPS`: Comma-separated group names (e.g. `Family,College Friends`)
+   - `PAIRING_PHONE_NUMBER`: Your WhatsApp phone number with country code (digits only, e.g. `14155552671`)
+   - `COOLDOWN_HOURS`: `48` (2 days)
+4. Open the Railway **Deploy Logs** to view the 8-character WhatsApp pairing code and enter it on your phone under **WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead**.
