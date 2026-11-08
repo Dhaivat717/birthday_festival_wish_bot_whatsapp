@@ -13,7 +13,7 @@ function parseList(val) {
 
 export const config = {
   geminiApiKey: process.env.GEMINI_API_KEY || '',
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  geminiModel: process.env.GEMINI_MODEL || 'auto',
   pairingPhoneNumber: (process.env.PAIRING_PHONE_NUMBER || '').replace(/\D/g, ''),
   allowedGroups: parseList(process.env.ALLOWED_GROUPS),
   minWishers: Math.max(1, parseInt(process.env.MIN_WISHERS || '2', 10)),
@@ -22,6 +22,8 @@ export const config = {
   groupGlobalCooldownHours: Math.max(0, parseFloat(process.env.GROUP_GLOBAL_COOLDOWN_HOURS || '0')),
   minDelaySeconds: Math.max(5, parseInt(process.env.MIN_DELAY_SECONDS || '45', 10)),
   maxDelaySeconds: Math.max(10, parseInt(process.env.MAX_DELAY_SECONDS || '180', 10)),
+  maxDailyGeminiCalls: Math.max(1, parseInt(process.env.MAX_DAILY_GEMINI_CALLS || '20', 10)),
+  dryRun: String(process.env.DRY_RUN || 'false').toLowerCase() === 'true',
   userStylePrompt:
     process.env.USER_STYLE_PROMPT ||
     'Keep it warm, natural, casual, and concise (1 short sentence). Match the language/vibe of the other group members. Do not sound overly formal or robotic.',

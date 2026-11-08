@@ -4,31 +4,114 @@ export class GeminiWishService {
   /**
    * @param {object} options
    * @param {string} options.apiKey
-   * @param {string} [options.model]
+   * @param {string} [options.model] Set to 'auto' (default) to automatically pick the latest flash-lite / flash model
    * @param {string} [options.userStylePrompt]
+   * @param {number} [options.maxDailyCalls] Hard daily cap on Gemini API requests
    */
-  constructor({ apiKey, model = 'gemini-2.5-flash', userStylePrompt = '' } = {}) {
+  constructor({ apiKey, model = 'auto', userStylePrompt = '', maxDailyCalls = 20 } = {}) {
     this.apiKey = apiKey;
-    this.model = model;
+    this.configuredModel = model || 'auto';
+    this.resolvedModel = null;
     this.userStylePrompt = userStylePrompt;
+    this.maxDailyCalls = maxDailyCalls;
+    this.dailyCount = 0;
+    this.currentDay = new Date().toISOString().slice(0, 10);
     this.ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+  }
+
+  _checkAndIncrementDailyQuota() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.currentDay) {
+      this.currentDay = today;
+      this.dailyCount = 0;
+    }
+    if (this.dailyCount >= this.maxDailyCalls) {
+      return false;
+    }
+    this.dailyCount += 1;
+    return true;
+  }
+
+  /**
+   * Dynamically discovers the newest available Gemini flash-lite (or flash) model
+   * from the API so you never have to manually update model names in .env.
+   */
+  async _resolveBestLiteModel(forceRefresh = false) {
+    if (!forceRefresh && this.resolvedModel) {
+      return this.resolvedModel;
+    }
+    if (!forceRefresh && this.configuredModel && this.configuredModel !== 'auto') {
+      this.resolvedModel = this.configuredModel;
+      return this.resolvedModel;
+    }
+
+    try {
+      const pager = await this.ai.models.list();
+      const candidates = [];
+
+      for await (const m of pager) {
+        const rawName = (m.name || '').replace(/^models\//, '');
+        const actions = m.supportedActions || m.supportedGenerationMethods || [];
+
+        // Must be a Geminiflash/lite text generation model
+        if (!rawName.startsWith('gemini-')) continue;
+        if (!rawName.includes('flash')) continue;
+        if (
+          /tts|image|vision|embedding|audio|live|thinking|computer-use|robotics|exp/i.test(rawName)
+        ) {
+          continue;
+        }
+        if (
+          Array.isArray(actions) &&
+          actions.length > 0 &&
+          !actions.includes('generateContent')
+        ) {
+          continue;
+        }
+
+        // Extract version number e.g. gemini-3.8-flash-lite -> 3.8
+        const verMatch = rawName.match(/^gemini-(\d+(?:\.\d+)?)/);
+        const version = verMatch ? parseFloat(verMatch[1]) : 0;
+        const isLite = rawName.includes('lite');
+        const isPreview = rawName.includes('preview');
+        const isLatestAlias = rawName.endsWith('-latest');
+
+        candidates.push({
+          name: rawName,
+          version,
+          isLite,
+          isPreview,
+          isLatestAlias,
+        });
+      }
+
+      if (candidates.length > 0) {
+        // Sort:
+        // 1. Highest major/minor version first (so deprecated old versions are skipped)
+        // 2. Prefer 'flash-lite' over regular 'flash' within the newest generation
+        // 3. Prefer stable over preview
+        candidates.sort((a, b) => {
+          if (b.version !== a.version) return b.version - a.version;
+          if (a.isLite !== b.isLite) return a.isLite ? -1 : 1;
+          if (a.isPreview !== b.isPreview) return a.isPreview ? 1 : -1;
+          return a.name.length - b.name.length;
+        });
+
+        this.resolvedModel = candidates[0].name;
+        console.log(`🤖 [Gemini] Auto-selected model: ${this.resolvedModel}`);
+        return this.resolvedModel;
+      }
+    } catch (err) {
+      console.warn(`[Gemini] Model auto-discovery fallback (${err.message})`);
+    }
+
+    // Fallback alias if models.list() fails
+    this.resolvedModel = 'gemini-flash-lite-latest';
+    return this.resolvedModel;
   }
 
   /**
    * Analyzes a batch of recent wish messages from a WhatsApp group and produces a structured wish decision.
-   * @param {object} params
-   * @param {string} params.groupName
-   * @param {Array<{ senderJid: string, senderName: string, text: string, mentionedJids: string[] }>} params.messages
-   * @param {string} [params.myJid] The bot owner's WhatsApp JID (to avoid wishing ourselves!)
-   * @param {string} [params.myName] The bot owner's display name
-   * @returns {Promise<{
-   *   shouldWish: boolean,
-   *   eventType: 'birthday' | 'festival' | 'anniversary' | 'other',
-   *   eventKey: string,
-   *   targetJid: string | null,
-   *   replyText: string,
-   *   reasoning: string
-   * }>}
    */
   async analyzeAndGenerateWish({ groupName, messages, myJid = '', myName = '' }) {
     // Safety check: if multiple messages mention the bot owner themselves, they are wishing US!
@@ -49,7 +132,7 @@ export class GeminiWishService {
       }
     }
 
-    if (!this.ai) {
+    if (!this.ai || !this._checkAndIncrementDailyQuota()) {
       return this._fallbackGenerate({ messages });
     }
 
@@ -84,57 +167,81 @@ Instructions:
 7. Write replyText on behalf of the user following this style guide:
    ${this.userStylePrompt}`;
 
-    const response = await this.ai.models.generateContent({
-      model: this.model,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            shouldWish: {
-              type: Type.BOOLEAN,
-              description: 'True if we should send a wish reply in the group.',
-            },
-            eventType: {
-              type: Type.STRING,
-              description: 'birthday, festival, anniversary, or other',
-            },
-            eventKey: {
-              type: Type.STRING,
-              description: 'Canonical lowercase identifier like birthday:rahul or festival:diwali',
-            },
-            targetJid: {
-              type: Type.STRING,
-              description: 'JID of the mentioned birthday/anniversary person if tagged, else empty string',
-            },
-            replyText: {
-              type: Type.STRING,
-              description: 'The natural wish message to send on the user behalf',
-            },
-            reasoning: {
-              type: Type.STRING,
-              description: 'Brief explanation of the decision',
-            },
+    const schemaConfig = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          shouldWish: {
+            type: Type.BOOLEAN,
+            description: 'True if we should send a wish reply in the group.',
           },
-          required: ['shouldWish', 'eventType', 'eventKey', 'targetJid', 'replyText', 'reasoning'],
+          eventType: {
+            type: Type.STRING,
+            description: 'birthday, festival, anniversary, or other',
+          },
+          eventKey: {
+            type: Type.STRING,
+            description: 'Canonical lowercase identifier like birthday:rahul or festival:diwali',
+          },
+          targetJid: {
+            type: Type.STRING,
+            description: 'JID of the mentioned birthday/anniversary person if tagged, else empty string',
+          },
+          replyText: {
+            type: Type.STRING,
+            description: 'The natural wish message to send on the user behalf',
+          },
+          reasoning: {
+            type: Type.STRING,
+            description: 'Brief explanation of the decision',
+          },
         },
+        required: ['shouldWish', 'eventType', 'eventKey', 'targetJid', 'replyText', 'reasoning'],
       },
-    });
-
-    const parsed = JSON.parse(response.text);
-    return {
-      shouldWish: Boolean(parsed.shouldWish),
-      eventType: parsed.eventType || 'other',
-      eventKey: parsed.eventKey || 'general_wish',
-      targetJid: parsed.targetJid ? parsed.targetJid.trim() : null,
-      replyText: (parsed.replyText || '').trim(),
-      reasoning: parsed.reasoning || '',
     };
+
+    try {
+      let modelName = await this._resolveBestLiteModel(false);
+      let response;
+      try {
+        response = await this.ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: schemaConfig,
+        });
+      } catch (firstErr) {
+        // If a model was deprecated/404, re-discover the latest available model from the API and retry once
+        if (String(firstErr.message || '').includes('404') || String(firstErr.message || '').includes('NOT_FOUND')) {
+          console.log(`[Gemini] Model "${modelName}" unavailable, auto-discovering newest lite model...`);
+          modelName = await this._resolveBestLiteModel(true);
+          response = await this.ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: schemaConfig,
+          });
+        } else {
+          throw firstErr;
+        }
+      }
+
+      const parsed = JSON.parse(response.text);
+      return {
+        shouldWish: Boolean(parsed.shouldWish),
+        eventType: parsed.eventType || 'other',
+        eventKey: parsed.eventKey || 'general_wish',
+        targetJid: parsed.targetJid ? parsed.targetJid.trim() : null,
+        replyText: (parsed.replyText || '').trim(),
+        reasoning: parsed.reasoning || '',
+      };
+    } catch (err) {
+      console.warn(`[Gemini] API call failed (${err.message}), using fallback wish generator.`);
+      return this._fallbackGenerate({ messages });
+    }
   }
 
   /**
-   * Rule-based fallback if GEMINI_API_KEY is not configured.
+   * Rule-based fallback if GEMINI_API_KEY is not configured or API fails.
    */
   _fallbackGenerate({ messages }) {
     const combined = messages.map((m) => m.text).join(' ');

@@ -31,6 +31,7 @@ export class WhatsAppWishBot {
       apiKey: config.geminiApiKey,
       model: config.geminiModel,
       userStylePrompt: config.userStylePrompt,
+      maxDailyCalls: config.maxDailyGeminiCalls,
     });
 
     // Cache of groupId -> groupSubject (name)
@@ -286,6 +287,15 @@ export class WhatsAppWishBot {
           // Double check cooldown right before sending
           const recheck = this.stateStore.canWish(remoteJid, analysis.eventKey);
           if (!recheck.allowed) return;
+
+          if (config.dryRun) {
+            console.log(
+              `🧪 [DRY RUN] [${groupName}] Would have sent wish (${analysis.eventKey}): "${analysis.replyText}"`
+            );
+            this.stateStore.recordWish(remoteJid, analysis.eventKey);
+            this.wishTracker.clearGroup(remoteJid);
+            return;
+          }
 
           // Simulate typing for 3 seconds for natural presence
           await this.sock.sendPresenceUpdate('composing', remoteJid);
