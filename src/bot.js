@@ -7,6 +7,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
+import zlib from 'zlib';
 import { config } from './config.js';
 import { StateStore } from './stateStore.js';
 import { WishTracker, looksLikeWish } from './wishDetector.js';
@@ -89,7 +90,7 @@ export class WhatsAppWishBot {
 
   async start() {
     // If a previous pairing code attempt timed out before finishing registration,
-    // clear the incomplete auth folder so the next pairing code starts fresh.
+    // clear the incomplete auth folder so the next pairing code or seed starts fresh.
     const credsFile = path.join(this.authDir, 'creds.json');
     if (fs.existsSync(credsFile)) {
       try {
@@ -100,6 +101,21 @@ export class WhatsAppWishBot {
         }
       } catch {
         // ignore parse errors
+      }
+    }
+
+    // Bootstrap pre-linked local WhatsApp session onto the cloud volume if AUTH_SEED_B64 is provided
+    if (!fs.existsSync(credsFile) && process.env.AUTH_SEED_B64) {
+      try {
+        const rawJson = zlib.gunzipSync(Buffer.from(process.env.AUTH_SEED_B64, 'base64')).toString('utf8');
+        const fileMap = JSON.parse(rawJson);
+        fs.mkdirSync(this.authDir, { recursive: true });
+        for (const [filename, content] of Object.entries(fileMap)) {
+          fs.writeFileSync(path.join(this.authDir, filename), content, 'utf8');
+        }
+        console.log(`🔑 Restored ${Object.keys(fileMap).length} WhatsApp auth files from AUTH_SEED_B64 onto volume!`);
+      } catch (seedErr) {
+        console.error('[Bot] Failed to restore AUTH_SEED_B64:', seedErr.message);
       }
     }
 
