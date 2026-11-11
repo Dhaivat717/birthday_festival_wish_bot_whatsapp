@@ -382,7 +382,7 @@ Instructions:
           }
         } else {
           const nameMatch = text.match(
-            /\b(?:birthday|bday|b'day|hbd|day)\s+(?:to\s+|dear\s+)?([A-Z][a-z]{2,15})\b/
+            /\b(?:birthday|bday|b'day|hbd|day)\s+(?:to\s+|dear\s+|bhai\s+|ben\s+)?([a-zA-Z]{2,15})\b/i
           );
           const name = nameMatch ? nameMatch[1] : 'general';
           addCandidate(
@@ -464,5 +464,39 @@ Instructions:
       replyText: '',
       reasoning: 'No unwished person/festival reached the minimum wisher threshold yet.',
     };
+  }
+
+  /**
+   * Extracts canonical eventKeys (e.g. 'birthday:rahul', 'birthday:919876543210@s.whatsapp.net', 'festival:diwali')
+   * when YOU manually send a wish in a group, so the bot adds that person/event + group to the 48h cooldown.
+   */
+  extractManualWishKeys({ text, mentionedJids = [], recentMessages = [] }) {
+    const keys = new Set();
+    const allMsgs = [
+      { senderJid: 'me', text, mentionedJids },
+      ...recentMessages,
+    ];
+
+    for (const m of allMsgs) {
+      const res = this._fallbackGenerate({
+        messages: [m],
+        alreadyWishedEvents: [],
+        minWishers: 1,
+      });
+      if (res.shouldWish && res.eventKey && res.eventKey !== 'unknown') {
+        keys.add(res.eventKey);
+      }
+      // Also if the manual message both tagged a JID and wrote a name, record both keys so either form matches!
+      if (m.mentionedJids && m.mentionedJids.length > 0 && /\b(?:bday|b'day|birthday|hbd|janamdin|returns)\b/i.test(m.text || '')) {
+        const nameMatch = (m.text || '').match(
+          /\b(?:birthday|bday|b'day|hbd|day)\s+(?:@[0-9]+\s+)?(?:to\s+|dear\s+|bhai\s+|ben\s+)?([a-zA-Z]{2,15})\b/i
+        );
+        if (nameMatch) {
+          keys.add(`birthday:${nameMatch[1].toLowerCase()}`);
+        }
+      }
+    }
+
+    return [...keys];
   }
 }

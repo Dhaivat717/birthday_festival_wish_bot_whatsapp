@@ -223,16 +223,39 @@ export class WhatsAppWishBot {
     }
 
     // If YOU manually sent a wish in this group from your phone (and self-triggering is not enabled),
-    // cancel any pending auto-wish for this group.
+    // cancel any pending auto-wish AND add that person/event + group to the 48h cooldown!
     if (msg.key.fromMe && !config.dryRun && !config.allowSelfTrigger) {
       if (looksLikeWish(text)) {
+        const recordedKeys = new Set();
+
         for (const [timerKey, timer] of this.pendingTimers.entries()) {
           if (timerKey.startsWith(`${remoteJid}::`)) {
             clearTimeout(timer);
             this.pendingTimers.delete(timerKey);
-            console.log(`[Bot] Cancelled pending auto-wish (${timerKey}) in "${groupName}" because you manually wished.`);
+            const pendingEventKey = timerKey.slice(`${remoteJid}::`.length);
+            this.stateStore.recordWish(remoteJid, pendingEventKey);
+            recordedKeys.add(pendingEventKey);
+            console.log(
+              `[Bot] Cancelled pending auto-wish (${pendingEventKey}) in "${groupName}" because you manually wished.`
+            );
           }
         }
+
+        const recentMessages = this.wishTracker.buffers.get(remoteJid) || [];
+        const manualKeys = this.gemini.extractManualWishKeys({
+          text,
+          mentionedJids,
+          recentMessages,
+        });
+        for (const k of manualKeys) {
+          const normKey = StateStore.normalizeKey(k);
+          this.stateStore.recordWish(remoteJid, normKey);
+          recordedKeys.add(normKey);
+        }
+
+        console.log(
+          `🛑 [${groupName}] Detected manual wish from you ("${text}"). Added [${[...recordedKeys].join(', ') || 'manual_wish'}] to ${config.cooldownHours}h cooldown.`
+        );
         this.wishTracker.clearGroup(remoteJid);
       }
       return;

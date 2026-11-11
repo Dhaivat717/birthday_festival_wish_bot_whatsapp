@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { looksLikeWish, WishTracker } from '../src/wishDetector.js';
 import { StateStore } from '../src/stateStore.js';
+import { GeminiWishService } from '../src/geminiService.js';
 
 test('looksLikeWish detects birthdays, festivals, and ignores normal chat', () => {
   assert.equal(looksLikeWish('Happy birthday Rahul!! 🎂🥳'), true);
@@ -108,6 +109,35 @@ test('StateStore allows multiple people to have birthdays on the same day in the
 
     // Rahul in a DIFFERENT group -> also allowed independently!
     assert.equal(store.canWish('other_group@g.us', 'birthday:rahul', t10m).allowed, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Manual wish from user extracts person/event keys and adds them to group cooldown', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wishbot-manual-'));
+  try {
+    const store = new StateStore(tmpDir, { cooldownHours: 48 });
+    const gemini = new GeminiWishService({ apiKey: '' });
+    const groupId = '120363380053782639@g.us';
+
+    const keys = gemini.extractManualWishKeys({
+      text: 'Happy birthday @919876543210 Krunal! 🎂',
+      mentionedJids: ['919876543210@s.whatsapp.net'],
+      recentMessages: [],
+    });
+
+    assert.equal(keys.includes('birthday:919876543210@s.whatsapp.net'), true);
+    assert.equal(keys.includes('birthday:krunal'), true);
+
+    for (const k of keys) {
+      store.recordWish(groupId, k);
+    }
+
+    assert.equal(store.canWish(groupId, 'birthday:919876543210@s.whatsapp.net').allowed, false);
+    assert.equal(store.canWish(groupId, 'birthday:krunal').allowed, false);
+    // Another person in the same group is still allowed:
+    assert.equal(store.canWish(groupId, 'birthday:deep').allowed, true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
