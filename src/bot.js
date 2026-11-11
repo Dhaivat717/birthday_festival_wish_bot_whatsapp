@@ -88,6 +88,21 @@ export class WhatsAppWishBot {
   }
 
   async start() {
+    // If a previous pairing code attempt timed out before finishing registration,
+    // clear the incomplete auth folder so the next pairing code starts fresh.
+    const credsFile = path.join(this.authDir, 'creds.json');
+    if (fs.existsSync(credsFile)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+        if (creds && creds.registered === false) {
+          fs.rmSync(this.authDir, { recursive: true, force: true });
+          fs.mkdirSync(this.authDir, { recursive: true });
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -114,7 +129,7 @@ export class WhatsAppWishBot {
         } catch (err) {
           console.error('[Bot] Failed to request pairing code:', err.message);
         }
-      }, 3000);
+      }, 4000);
     }
 
     this.sock.ev.on('connection.update', async (update) => {
@@ -127,16 +142,17 @@ export class WhatsAppWishBot {
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
         console.log(
-          `[Bot] Connection closed (status: ${statusCode}). Reconnecting: ${shouldReconnect}`
+          `[Bot] Connection closed (status: ${statusCode}).`
         );
-        if (shouldReconnect) {
-          this.pairingRequested = false;
-          setTimeout(() => this.start(), 4000);
-        } else {
-          console.log('[Bot] Logged out from WhatsApp. Delete data/auth_info_baileys and restart to re-link.');
+        if (isLoggedOut) {
+          console.log('[Bot] Session logged out or pairing expired. Clearing auth state and requesting a fresh link in 5s...');
+          fs.rmSync(this.authDir, { recursive: true, force: true });
+          fs.mkdirSync(this.authDir, { recursive: true });
         }
+        this.pairingRequested = false;
+        setTimeout(() => this.start(), 5000);
       } else if (connection === 'open') {
         console.log('\n✅ Connected to WhatsApp!');
         await this.refreshGroupMetadata();
