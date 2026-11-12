@@ -12,11 +12,14 @@ import { config } from './config.js';
 import { StateStore } from './stateStore.js';
 import { WishTracker, looksLikeWish } from './wishDetector.js';
 import { GeminiWishService } from './geminiService.js';
+import { MetricsStore } from './metricsStore.js';
 
 export class WhatsAppWishBot {
   constructor() {
     this.authDir = path.join(config.dataDir, 'auth_info_baileys');
     fs.mkdirSync(this.authDir, { recursive: true });
+
+    this.metrics = new MetricsStore(config.dataDir);
 
     this.stateStore = new StateStore(config.dataDir, {
       cooldownHours: config.cooldownHours,
@@ -33,6 +36,7 @@ export class WhatsAppWishBot {
       model: config.geminiModel,
       userStylePrompt: config.userStylePrompt,
       maxDailyCalls: config.maxDailyGeminiCalls,
+      metrics: this.metrics,
     });
 
     // Cache of groupId -> groupSubject (name)
@@ -162,6 +166,8 @@ export class WhatsAppWishBot {
         console.log(
           `[Bot] Connection closed (status: ${statusCode}).`
         );
+        this.metrics.setConnectionStatus('reconnecting');
+        this.metrics.recordFault('whatsapp_disconnect', `Connection closed with status ${statusCode}`);
         if (isLoggedOut) {
           console.log('[Bot] Session logged out or pairing expired. Clearing auth state and requesting a fresh link in 5s...');
           fs.rmSync(this.authDir, { recursive: true, force: true });
@@ -170,6 +176,7 @@ export class WhatsAppWishBot {
         this.pairingRequested = false;
         setTimeout(() => this.start(), 5000);
       } else if (connection === 'open') {
+        this.metrics.setConnectionStatus('open');
         console.log('\n✅ Connected to WhatsApp!');
         await this.refreshGroupMetadata();
       }
@@ -180,6 +187,7 @@ export class WhatsAppWishBot {
       for (const msg of messages) {
         await this.handleIncomingMessage(msg).catch((err) => {
           console.error('[Bot] Error handling message:', err);
+          this.metrics.recordFault('message_handler_error', err);
         });
       }
     });
@@ -195,6 +203,7 @@ export class WhatsAppWishBot {
 
       console.log(`\n📋 Found ${entries.length} WhatsApp groups.`);
       const whitelisted = entries.filter((g) => this.isGroupAllowed(g.id, g.subject));
+      this.metrics.registerGroups(whitelisted);
 
       // Also save all groups to data/groups_list.txt for easy searching
       const groupLines = entries.map((g, idx) => `${idx + 1}. "${g.subject}" (${g.id})`);
@@ -239,18 +248,28 @@ export class WhatsAppWishBot {
 
   async handleIncomingMessage(msg) {
     const remoteJid = msg.key?.remoteJid;
-    if (!remoteJid || !remoteJid.endsWith('@g.us')) return; // Only group chats
+    if (!remoteJid) return;
 
     const { text, mentionedJids } = this.extractMessageDetails(msg);
     if (!text) return;
 
-    const groupName = await this.getGroupName(remoteJid);
-    if (!this.isGroupAllowed(remoteJid, groupName)) {
+    // Never react to a message that the bot itself just sent!
+    if (msg.key?.id && this.sentByBotIds.has(msg.key.id)) {
       return;
     }
 
-    // Never react to a message that the bot itself just sent!
-    if (msg.key?.id && this.sentByBotIds.has(msg.key.id)) {
+    // Allow sending "!stats" or "!metrics" in your own "Message Yourself" chat to get live metrics on WhatsApp!
+    if (!remoteJid.endsWith('@g.us')) {
+      if (msg.key?.fromMe && /^!(?:stats|metrics|status)\b/i.test(text.trim())) {
+        const summary = this.metrics.formatWhatsAppSummary();
+        const sent = await this.sock.sendMessage(remoteJid, { text: summary });
+        if (sent?.key?.id) this.sentByBotIds.add(sent.key.id);
+      }
+      return;
+    }
+
+    const groupName = await this.getGroupName(remoteJid);
+    if (!this.isGroupAllowed(remoteJid, groupName)) {
       return;
     }
 
@@ -285,6 +304,7 @@ export class WhatsAppWishBot {
           recordedKeys.add(normKey);
         }
 
+        this.metrics.recordManualWish(remoteJid, groupName, [...recordedKeys]);
         console.log(
           `🛑 [${groupName}] Detected manual wish from you ("${text}"). Added [${[...recordedKeys].join(', ') || 'manual_wish'}] to ${config.cooldownHours}h cooldown.`
         );
@@ -311,6 +331,7 @@ export class WhatsAppWishBot {
 
     if (!trackResult.matched) return;
 
+    this.metrics.recordWishCandidate(remoteJid, groupName, senderName);
     console.log(
       `💬 [${groupName}] Wish detected from ${senderName}: "${text}" (${trackResult.uniqueWisherCount}/${config.minWishers} wishers in window)`
     );
@@ -359,6 +380,7 @@ export class WhatsAppWishBot {
       // Check 2-day (48h) cooldown for this group + specific person/eventKey
       const cooldownCheck = this.stateStore.canWish(remoteJid, normEventKey);
       if (!cooldownCheck.allowed) {
+        this.metrics.recordCooldownSkip(remoteJid, groupName, normEventKey);
         console.log(`⏳ [${groupName}] Cooldown active: ${cooldownCheck.reason}`);
         return;
       }
@@ -385,6 +407,15 @@ export class WhatsAppWishBot {
               `🧪 [DRY RUN] [${groupName}] Would have sent wish (${normEventKey}): "${analysis.replyText}"`
             );
             this.stateStore.recordWish(remoteJid, normEventKey);
+            this.metrics.recordWishSent({
+              groupId: remoteJid,
+              groupName,
+              targetName: analysis.targetName || normEventKey,
+              eventType: analysis.eventType,
+              eventKey: normEventKey,
+              replyText: analysis.replyText,
+              isDryRun: true,
+            });
             await this.notifySelf({
               targetName: analysis.targetName || normEventKey,
               replyText: analysis.replyText,
@@ -412,6 +443,16 @@ export class WhatsAppWishBot {
             this.sentByBotIds.add(sentMsg.key.id);
           }
 
+          this.metrics.recordWishSent({
+            groupId: remoteJid,
+            groupName,
+            targetName: analysis.targetName || normEventKey,
+            eventType: analysis.eventType,
+            eventKey: normEventKey,
+            replyText: analysis.replyText,
+            isDryRun: false,
+          });
+
           console.log(
             `✅ [${groupName}] Sent auto-wish (${normEventKey}): "${analysis.replyText}" (Next wish for ${normEventKey} allowed after ${config.cooldownHours}h)`
           );
@@ -424,6 +465,10 @@ export class WhatsAppWishBot {
           });
         } catch (sendErr) {
           console.error(`[Bot] Failed to send wish in "${groupName}":`, sendErr.message);
+          this.metrics.recordFault('send_message_error', sendErr, {
+            groupId: remoteJid,
+            groupName,
+          });
         }
       }, delaySec * 1000);
 

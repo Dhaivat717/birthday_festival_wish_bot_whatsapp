@@ -49,12 +49,13 @@ export class GeminiWishService {
    * @param {string} [options.userStylePrompt]
    * @param {number} [options.maxDailyCalls] Hard daily cap on Gemini API requests
    */
-  constructor({ apiKey, model = 'auto', userStylePrompt = '', maxDailyCalls = 20 } = {}) {
+  constructor({ apiKey, model = 'auto', userStylePrompt = '', maxDailyCalls = 20, metrics = null } = {}) {
     this.apiKey = apiKey;
     this.configuredModel = model || 'auto';
     this.resolvedModel = null;
     this.userStylePrompt = userStylePrompt;
     this.maxDailyCalls = maxDailyCalls;
+    this.metrics = metrics;
     this.dailyCount = 0;
     this.currentDay = new Date().toISOString().slice(0, 10);
     this.ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -298,6 +299,7 @@ Instructions:
         }
       }
 
+      this.metrics?.recordGeminiCall({ model: modelName, usedFallback: false });
       const parsed = JSON.parse(response.text);
       return {
         shouldWish: Boolean(parsed.shouldWish),
@@ -310,6 +312,8 @@ Instructions:
       };
     } catch (err) {
       console.warn(`[Gemini] API call failed (${err.message}), using fallback wish generator.`);
+      this.metrics?.recordGeminiCall({ model: this.resolvedModel || 'fallback', usedFallback: true });
+      this.metrics?.recordFault('gemini_error', err, { groupName });
       return this._fallbackGenerate({
         messages: nonSelfMessages,
         alreadyWishedEvents,

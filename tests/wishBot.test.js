@@ -6,6 +6,7 @@ import path from 'node:path';
 import { looksLikeWish, WishTracker } from '../src/wishDetector.js';
 import { StateStore } from '../src/stateStore.js';
 import { GeminiWishService } from '../src/geminiService.js';
+import { MetricsStore } from '../src/metricsStore.js';
 
 test('looksLikeWish detects birthdays, festivals, and ignores normal chat', () => {
   assert.equal(looksLikeWish('Happy birthday Rahul!! 🎂🥳'), true);
@@ -138,6 +139,45 @@ test('Manual wish from user extracts person/event keys and adds them to group co
     assert.equal(store.canWish(groupId, 'birthday:krunal').allowed, false);
     // Another person in the same group is still allowed:
     assert.equal(store.canWish(groupId, 'birthday:deep').allowed, true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('MetricsStore tracks wishes per group, faults, and exports Prometheus & WhatsApp summaries', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wishbot-metrics-'));
+  try {
+    const metrics = new MetricsStore(tmpDir);
+    metrics.registerGroups([{ id: '120363380053782639@g.us', subject: 'JC RU' }]);
+    metrics.setConnectionStatus('open');
+
+    metrics.recordWishCandidate('120363380053782639@g.us', 'JC RU', 'Alice');
+    metrics.recordWishSent({
+      groupId: '120363380053782639@g.us',
+      groupName: 'JC RU',
+      targetName: 'Krunal',
+      eventType: 'birthday',
+      eventKey: 'birthday:krunal',
+      replyText: 'Happy Birthday Krunal! 🎂',
+      isDryRun: false,
+    });
+    metrics.recordFault('gemini_error', new Error('Quota exceeded'), {
+      groupId: '120363380053782639@g.us',
+      groupName: 'JC RU',
+    });
+
+    const snap = metrics.getSnapshot();
+    assert.equal(snap.totals.wishesSent, 1);
+    assert.equal(snap.totals.faultsTotal, 1);
+    assert.equal(snap.groups[0].wishesSent, 1);
+    assert.equal(snap.groups[0].byType.birthday, 1);
+
+    const prom = metrics.toPrometheus();
+    assert.equal(prom.includes('whatsapp_wishes_sent_total{group_id="120363380053782639@g.us",group_name="JC RU",event_type="birthday"} 1'), true);
+    assert.equal(prom.includes('whatsapp_faults_total{category="gemini_error"} 1'), true);
+
+    const waSummary = metrics.formatWhatsAppSummary();
+    assert.equal(waSummary.includes('JC RU'), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
