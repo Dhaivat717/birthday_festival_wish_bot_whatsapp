@@ -176,6 +176,29 @@ test('MetricsStore tracks wishes per group, faults, and exports Prometheus & Wha
     assert.equal(prom.includes('whatsapp_wishes_sent_total{group_id="120363380053782639@g.us",group_name="JC RU",event_type="birthday"} 1'), true);
     assert.equal(prom.includes('whatsapp_faults_total{category="gemini_error"} 1'), true);
 
+    // Test WebSocket disconnect + failed reconnect + stuck disconnected tracking
+    metrics.recordWsDisconnect({ statusCode: 428, reason: 'Connection Terminated' });
+    assert.equal(metrics.getSnapshot().wsConnected, false);
+    assert.equal(metrics.getSnapshot().totals.wsDisconnects, 1);
+
+    // Second disconnect while already reconnecting -> counts as a failed reconnect!
+    metrics.recordWsDisconnect({ statusCode: 408, reason: 'Timed Out' });
+    assert.equal(metrics.getSnapshot().totals.wsReconnectFailures, 1);
+    assert.equal(metrics.getSnapshot().consecutiveReconnectFailures, 1);
+
+    // Watchdog fires when WebSocket stays disconnected and doesn't reconnect
+    metrics.recordWsStuckDisconnected({ reason: '60s watchdog threshold exceeded', countAsAttemptFailure: true });
+    assert.equal(metrics.getSnapshot().wsStuckDisconnected, true);
+    assert.equal(metrics.getSnapshot().totals.wsStuckDisconnectedAlerts, 1);
+    assert.equal(metrics.toPrometheus().includes('whatsapp_ws_stuck_disconnected 1'), true);
+
+    // Finally reconnects -> clears stuck flag and increments wsReconnectSuccess
+    metrics.setConnectionOpen();
+    assert.equal(metrics.getSnapshot().wsConnected, true);
+    assert.equal(metrics.getSnapshot().wsStuckDisconnected, false);
+    assert.equal(metrics.getSnapshot().consecutiveReconnectFailures, 0);
+    assert.equal(metrics.getSnapshot().totals.wsReconnectSuccess, 1);
+
     const waSummary = metrics.formatWhatsAppSummary();
     assert.equal(waSummary.includes('JC RU'), true);
   } finally {

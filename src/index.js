@@ -32,10 +32,18 @@ function escapeHtml(str) {
 
 function renderDashboardHtml(snap) {
   const uptimeHours = (snap.uptimeSeconds / 3600).toFixed(2);
-  const statusBadge =
-    snap.status === 'open'
-      ? '<span style="color:#22c55e;font-weight:700;">● Connected</span>'
-      : `<span style="color:#eab308;font-weight:700;">● ${escapeHtml(snap.status)}</span>`;
+  const statusBadge = snap.wsConnected
+    ? '<span style="color:#22c55e;font-weight:700;">● WS Connected</span>'
+    : snap.wsStuckDisconnected
+    ? `<span style="color:#ef4444;font-weight:700;">🚨 WS Stuck Disconnected (${snap.currentDowntimeSeconds}s)</span>`
+    : `<span style="color:#eab308;font-weight:700;">● ${escapeHtml(snap.status)} (${snap.currentDowntimeSeconds}s)</span>`;
+
+  const stuckAlertBanner = snap.wsStuckDisconnected
+    ? `<div style="background:#7f1d1d;border:1px solid #ef4444;color:#fecaca;padding:12px 16px;border-radius:8px;margin-bottom:20px;">
+        <strong>🚨 WebSocket Disconnected &amp; Failed to Reconnect!</strong>
+        Down for <strong>${snap.currentDowntimeSeconds}s</strong> • Consecutive failed reconnects: <strong>${snap.consecutiveReconnectFailures}</strong> • Last status code: <strong>${escapeHtml(snap.lastDisconnectStatusCode ?? 'none')}</strong>
+      </div>`
+    : '';
 
   const groupRows =
     snap.groups.length === 0
@@ -111,13 +119,16 @@ function renderDashboardHtml(snap) {
       </div>
     </div>
 
+    ${stuckAlertBanner}
+
     <div class="cards">
       <div class="card"><div class="label">Total Wishes Sent</div><div class="val" style="color:#38bdf8;">${snap.totals.wishesSent}</div></div>
       <div class="card"><div class="label">Wish Msgs Detected</div><div class="val">${snap.totals.wishCandidatesDetected}</div></div>
       <div class="card"><div class="label">Manual Wishes by You</div><div class="val" style="color:#a78bfa;">${snap.totals.manualWishesDetected}</div></div>
       <div class="card"><div class="label">Gemini Calls</div><div class="val">${snap.totals.geminiCalls}</div><small style="color:#64748b;">Model: ${escapeHtml(snap.lastModelUsed)}</small></div>
+      <div class="card"><div class="label">WS Failed Reconnects</div><div class="val" style="color:${snap.totals.wsReconnectFailures > 0 || snap.wsStuckDisconnected ? '#f87171' : '#22c55e'};">${snap.totals.wsReconnectFailures}</div><small style="color:#64748b;">Disconnects: ${snap.totals.wsDisconnects} • Recovered: ${snap.totals.wsReconnectSuccess}</small></div>
       <div class="card"><div class="label">Faults / Errors</div><div class="val" style="color:${snap.totals.faultsTotal > 0 ? '#f87171' : '#22c55e'};">${snap.totals.faultsTotal}</div></div>
-      <div class="card"><div class="label">Uptime</div><div class="val">${uptimeHours}h</div><small style="color:#64748b;">Reconnects: ${snap.reconnectCount}</small></div>
+      <div class="card"><div class="label">Uptime</div><div class="val">${uptimeHours}h</div><small style="color:#64748b;">Down now: ${snap.currentDowntimeSeconds}s</small></div>
     </div>
 
     <h2>📊 Wishes Per Group (${snap.groups.length} Whitelisted Groups)</h2>

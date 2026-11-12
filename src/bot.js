@@ -49,6 +49,54 @@ export class WhatsAppWishBot {
     this.sentByBotIds = new Set();
     this.sock = null;
     this.pairingRequested = false;
+    this.reconnectTimer = null;
+    this.connectAttemptTimeout = null;
+    this.wsWatchdogTimer = null;
+    this.lastKnownVersion = null;
+  }
+
+  _scheduleReconnect(delayMs = 5000) {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      try {
+        await this.start();
+      } catch (err) {
+        this.metrics.recordWsStuckDisconnected({
+          reason: `Reconnect start() threw: ${err.message}`,
+          countAsAttemptFailure: true,
+        });
+        this._scheduleReconnect(10000);
+      }
+    }, delayMs);
+  }
+
+  _startWsWatchdog() {
+    if (this.wsWatchdogTimer) return;
+    // Check after 60s if the WebSocket is still disconnected, and every 2 minutes thereafter while unrecovered
+    this.wsWatchdogTimer = setInterval(() => {
+      if (this.metrics.connectionStatus !== 'open') {
+        this.metrics.recordWsStuckDisconnected({
+          reason: 'WebSocket remained disconnected past 60s watchdog threshold',
+          countAsAttemptFailure: false,
+        });
+      } else {
+        this._clearWsWatchdog();
+      }
+    }, 60000);
+  }
+
+  _clearWsWatchdog() {
+    if (this.wsWatchdogTimer) {
+      clearInterval(this.wsWatchdogTimer);
+      this.wsWatchdogTimer = null;
+    }
+    if (this.connectAttemptTimeout) {
+      clearTimeout(this.connectAttemptTimeout);
+      this.connectAttemptTimeout = null;
+    }
   }
 
   /**
@@ -123,8 +171,46 @@ export class WhatsAppWishBot {
       }
     }
 
+    // Clean up any previous socket instance before opening a new one
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners();
+        this.sock.ws?.close();
+      } catch {
+        // ignore cleanup errors
+      }
+      this.sock = null;
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-    const { version } = await fetchLatestBaileysVersion();
+    let version = this.lastKnownVersion;
+    try {
+      const fetched = await fetchLatestBaileysVersion();
+      if (fetched?.version) {
+        version = fetched.version;
+        this.lastKnownVersion = version;
+      }
+    } catch (verErr) {
+      console.warn('[Bot] Could not fetch latest Baileys version, using cached/fallback:', verErr.message);
+      version = version || [2, 3000, 1015901307];
+    }
+
+    // Start the watchdog while connecting/reconnecting so we emit a metric if the WebSocket fails to connect within 60s
+    this._startWsWatchdog();
+
+    // Guard against a single socket attempt hanging silently in 'connecting' state for >45s
+    if (this.connectAttemptTimeout) {
+      clearTimeout(this.connectAttemptTimeout);
+    }
+    this.connectAttemptTimeout = setTimeout(() => {
+      if (this.metrics.connectionStatus !== 'open') {
+        this.metrics.recordWsStuckDisconnected({
+          reason: 'WebSocket handshake timed out after 45s without opening',
+          countAsAttemptFailure: true,
+        });
+        this._scheduleReconnect(3000);
+      }
+    }, 45000);
 
     this.sock = makeWASocket({
       version,
@@ -161,22 +247,32 @@ export class WhatsAppWishBot {
       }
 
       if (connection === 'close') {
+        if (this.connectAttemptTimeout) {
+          clearTimeout(this.connectAttemptTimeout);
+          this.connectAttemptTimeout = null;
+        }
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const reasonMsg = lastDisconnect?.error?.message || '';
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
         console.log(
           `[Bot] Connection closed (status: ${statusCode}).`
         );
-        this.metrics.setConnectionStatus('reconnecting');
-        this.metrics.recordFault('whatsapp_disconnect', `Connection closed with status ${statusCode}`);
+        this.metrics.recordWsDisconnect({
+          statusCode: statusCode ?? 'unknown',
+          reason: reasonMsg,
+          isLoggedOut,
+        });
+        this._startWsWatchdog();
         if (isLoggedOut) {
           console.log('[Bot] Session logged out or pairing expired. Clearing auth state and requesting a fresh link in 5s...');
           fs.rmSync(this.authDir, { recursive: true, force: true });
           fs.mkdirSync(this.authDir, { recursive: true });
         }
         this.pairingRequested = false;
-        setTimeout(() => this.start(), 5000);
+        this._scheduleReconnect(5000);
       } else if (connection === 'open') {
-        this.metrics.setConnectionStatus('open');
+        this._clearWsWatchdog();
+        this.metrics.setConnectionOpen();
         console.log('\n✅ Connected to WhatsApp!');
         await this.refreshGroupMetadata();
       }
